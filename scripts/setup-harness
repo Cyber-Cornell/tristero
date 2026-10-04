@@ -1,0 +1,60 @@
+#!/usr/bin/env python3
+"""Install only inside this checkout; Linux coordinator or Ubuntu worker VM."""
+import hashlib
+import json
+import os
+from pathlib import Path
+import platform
+import subprocess
+import sys
+import tarfile
+import urllib.request
+import venv
+
+ROOT = Path(__file__).resolve().parents[1]
+VERSION = "1.18.34"
+
+
+def main():
+    if sys.version_info < (3, 11) or platform.system() != "Linux":
+        sys.exit("Use Python 3.11+ on Linux. OpenCode workers must run inside dedicated Ubuntu VMs.")
+    tools = ROOT / ".tools"
+    for directory in ("bin", "downloads", "cache/pip"):
+        (tools / directory).mkdir(parents=True, exist_ok=True)
+    environment = os.environ | {"PIP_CACHE_DIR": str(tools / "cache/pip")}
+    environment["PYTHONPYCACHEPREFIX"] = str(tools / "cache/pycache")
+    environment["UV_CACHE_DIR"] = str(tools / "cache/uv")
+    python = tools / "harness-venv/bin/python"
+    if not python.exists():
+        venv.create(tools / "harness-venv", with_pip=True)
+    uv = tools / "bin/uv"
+    command = ([str(uv), "pip", "install", "--python", str(python)] if uv.exists()
+               else [str(python), "-m", "pip", "install"])
+    subprocess.run(command + ["-r", str(ROOT / "requirements.lock")], env=environment, check=True)
+    architecture = {"x86_64": "x64-baseline", "aarch64": "arm64"}.get(platform.machine())
+    if not architecture:
+        sys.exit("Unsupported architecture: " + platform.machine())
+    binary = tools / "bin/opencode"
+    if binary.exists() and subprocess.check_output([str(binary), "--version"], text=True).strip() == VERSION:
+        print("Harness dependencies and OpenCode " + VERSION + " ready.")
+        return
+    url = f"https://api.github.com/repos/anomalyco/opencode/releases/tags/v{VERSION}"
+    with urllib.request.urlopen(url, timeout=30) as response:
+        release = json.load(response)
+    name = f"opencode-linux-{architecture}.tar.gz"
+    asset = next(a for a in release["assets"] if a["name"] == name)
+    archive = tools / "downloads" / name
+    urllib.request.urlretrieve(asset["browser_download_url"], archive)
+    digest = asset.get("digest", "")
+    if not digest.startswith("sha256:") or hashlib.sha256(archive.read_bytes()).hexdigest() != digest[7:]:
+        sys.exit("Release archive checksum mismatch or unavailable.")
+    with tarfile.open(archive) as contents:
+        member = next(m for m in contents.getmembers() if m.name == "opencode" and m.isfile())
+        with contents.extractfile(member) as source:
+            binary.write_bytes(source.read())
+    binary.chmod(0o755)
+    print("Harness dependencies and OpenCode " + VERSION + " ready.")
+
+
+if __name__ == "__main__":
+    main()

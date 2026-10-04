@@ -1,0 +1,55 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Godswork · Team control</title>
+<style>
+:root{color-scheme:dark;font-family:system-ui,sans-serif;background:#111820;color:#edf2f7}body{max-width:1150px;margin:auto;padding:24px}h1{font-size:26px}h2{font-size:20px;margin-top:32px}button,input,textarea,select{font:inherit;padding:9px;border:1px solid #536779;border-radius:5px;background:#1c2935;color:inherit}button{cursor:pointer}button:hover{background:#314658}input,textarea{box-sizing:border-box}textarea{width:100%;min-height:80px}label{display:block;margin:10px 0}table{width:100%;border-collapse:collapse}th,td{text-align:left;vertical-align:top;padding:10px;border-bottom:1px solid #334350}pre{white-space:pre-wrap;overflow-wrap:anywhere;background:#18242e;padding:12px;border-radius:5px}details{margin:10px 0}summary{cursor:pointer}small,.muted{color:#aabaca}.error{color:#ff9b9b;white-space:pre-wrap}.row{display:flex;gap:10px;flex-wrap:wrap}.pill{padding:4px 8px;background:#263849;border-radius:4px}a{color:#acd9ff}#banner{padding:12px;background:#263849;margin:12px 0}#notice{position:sticky;top:0;background:#111820;z-index:2}
+</style>
+<h1>Godswork <small>Team control</small></h1>
+<p class="muted">Assigned systems · shared tasks · human-reviewed injects</p>
+<div id="notice" role="status"></div>
+<form id="login"><h2>Sign in</h2><label>Competitor <input name="username" autocomplete="username" required></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form>
+<main id="main" hidden>
+<div class="row"><button id="pause">Pause all workers</button><button id="resume">Resume dispatch</button><button id="logout">Sign out</button></div>
+<div id="banner"></div>
+<nav class="row"><a href="#services">Services</a><a href="#workers">Workers</a><a href="#tasks">Tasks</a><a href="#injects">Injects</a><a href="#vault">Credentials</a></nav>
+<h2 id="services">Service status</h2><div id="service-list"></div>
+<h2 id="workers">Workers</h2><div id="worker-list"></div>
+<h2 id="tasks">Tasks and discussion</h2>
+<form id="newtask"><label>Title <input name="title" required></label><label>Targets (comma-separated IDs) <input name="resources" required></label><label>Instructions <textarea name="instructions" required></textarea></label><button>Create task</button></form>
+<div id="task-list"></div>
+<h2 id="injects">Injects</h2><p id="template-status"></p><div id="inject-list"></div>
+<h2 id="vault">Credential vault</h2><p class="muted">Assigned passwords may be sent to the selected free model. Shared discussion and ordinary operation logs redact known passwords.</p><div id="credential-list"></div><pre id="secret" hidden></pre>
+<h2>Rotation journal</h2><div id="rotation-list"></div>
+<details><summary>Recent audit events</summary><pre id="audit"></pre></details>
+</main>
+<script>
+let csrf='',state={},timer;
+const $=id=>document.getElementById(id);
+function notice(text,error=false){$('notice').textContent=text;$('notice').className=error?'error':'';}
+async function api(path,body){const r=await fetch(path,{method:body===undefined?'GET':'POST',headers:{'Content-Type':'application/json','X-Godswork-CSRF':csrf},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(typeof data.detail==='string'?data.detail:JSON.stringify(data.detail));return data;}
+function node(tag,text){const n=document.createElement(tag);if(text!==undefined)n.textContent=text;return n;}
+function button(text,fn){const n=node('button',text);n.type='button';n.onclick=async()=>{try{await fn();await refresh();notice('Updated.');}catch(e){notice(e.message,true);}};return n;}
+function table(id,columns,rows){const t=node('table'),head=node('tr');columns.forEach(c=>head.append(node('th',c)));t.append(head);rows.forEach(cells=>{const tr=node('tr');cells.forEach(c=>{const td=node('td');td.append(c instanceof Node?c:node('span',String(c)));tr.append(td);});t.append(tr);});$(id).replaceChildren(t);}
+function controls(...buttons){const d=node('div');d.className='row';d.append(...buttons);return d;}
+async function refresh(){try{state=await api('/api/state');}catch(e){if(!csrf){$('login').hidden=false;$('main').hidden=true;return;}throw e;}
+ csrf=state.csrf;$('login').hidden=true;$('main').hidden=false;
+ $('banner').textContent=(state.settings.paused?'PAUSED — new remote operations blocked.':'Dispatch active.')+' Signed in as '+state.user+'. '+(state.portal_error?'Portal: '+state.portal_error:'');
+ $('template-status').textContent=state.template_ready?'Team template loaded. Competitors review and submit drafts manually.':'Supply the actual team template to enable inject drafting.';
+ table('service-list',['Service','Status','Target','Dependencies','Last observation'],state.services.map(s=>[s.id,s.status,s.target,s.depends_on.join(', '),s.observed_at?new Date(s.observed_at*1000).toLocaleTimeString():'No observation']));
+ table('worker-list',['Worker','Connection','Status','Controls'],state.workers.map(w=>[w.id,w.revoked?'revoked':w.online?'online':'offline',w.stopped?'stopped':w.status,controls(button('Stop',()=>api('/api/control',{action:'stop',id:w.id})),button('Restart dispatch',()=>api('/api/control',{action:'restart',id:w.id})),button('Revoke',()=>api('/api/control',{action:'revoke',id:w.id})))]));
+ const open=new Set([...$('task-list').querySelectorAll('details[open]')].map(n=>n.dataset.id));
+ $('task-list').replaceChildren(...state.tasks.slice().reverse().map(t=>{const d=node('details');d.dataset.id=t.id;d.open=open.has(t.id);d.append(node('summary',t.title+' · '+t.state+' · '+t.resources.join(', ')),node('small',t.id),node('pre',t.instructions),node('pre',JSON.stringify(t.participants,null,2)));if(t.reason)d.append(node('p',t.reason));state.messages.filter(m=>m.task===t.id).forEach(m=>d.append(node('p',m.author+': '+m.text)));const f=node('form'),input=node('textarea');input.placeholder='Message competitors and agents';input.setAttribute('aria-label','Task message');f.append(input,node('button','Post message'));f.onsubmit=async e=>{e.preventDefault();try{await api('/api/thread',{task:t.id,text:input.value});await refresh();}catch(e){notice(e.message,true);}};d.append(f);
+ state.operations.filter(o=>o.task===t.id).forEach(o=>{const evidence=node('details');evidence.append(node('summary','Evidence '+o.id+' · '+o.target+' · '+o.state),node('pre',o.command),node('pre',JSON.stringify(o.result||{},null,2)));d.append(evidence);});
+ if(t.state==='uncertain')d.append(button('Reconcile and release locks',async()=>{const note=prompt('Describe confirmed remote quiescence and completed recovery:');if(note)await api('/api/control',{action:'reconcile',id:t.id,note});}));return d;}));
+ $('inject-list').replaceChildren(...state.injects.map(i=>{const d=node('details');d.append(node('summary',i.title+' · '+i.state+' · due '+i.deadline),node('pre',i.instructions),node('pre',i.draft||'No draft'));d.append(controls(button('Assign draft',async()=>{const ids=prompt('Target IDs for evidence collection, comma-separated:');if(ids)await api('/api/injects/'+i.id+'/assign',{resources:ids.split(',').map(x=>x.trim()).filter(Boolean)});}),button('Mark reviewed',()=>api('/api/injects/'+i.id+'/review',{state:'reviewed'})),button('Mark manually submitted',()=>api('/api/injects/'+i.id+'/review',{state:'submitted'})),button('Download draft',()=>{const a=node('a');a.href=URL.createObjectURL(new Blob([i.draft],{type:'text/markdown'}));a.download=i.id+'.md';a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000);})));return d;}));
+ table('credential-list',['Credential','Issuer','Consumers','Version','Access'],state.credentials.map(c=>[c.id,c.target,c.consumers.join(', '),c.version,button('Reveal',async()=>{const secret=await api('/api/credential',{id:c.id});$('secret').hidden=false;$('secret').textContent=c.id+'\n'+secret.username+'\n'+secret.password;setTimeout(()=>{$('secret').textContent='';$('secret').hidden=true;},20000);})]));
+ $('rotation-list').replaceChildren(...state.rotations.map(r=>{const d=node('details');d.append(node('summary',r.credential+' · '+r.stage),node('pre',JSON.stringify(r,null,2)));if(r.stage!=='committed')d.append(button('Record manual recovery',async()=>{const note=prompt('After stopping workers and manually verifying issuer and every consumer, describe recovery:');if(!note)return;const choice=prompt('Enter pending if all systems use the new password, or previous if all have been restored:');if(choice==='pending'||choice==='previous')await api('/api/rotation/recover',{id:r.id,use_pending:choice==='pending',note});}));return d;}));
+ $('audit').textContent=JSON.stringify(state.audits.slice(-30),null,2);
+}
+$('login').onsubmit=async e=>{e.preventDefault();try{await api('/api/login',Object.fromEntries(new FormData(e.target)));e.target.password.value='';await refresh();notice('Signed in.');}catch(e){notice(e.message,true);}};
+$('newtask').onsubmit=async e=>{e.preventDefault();const b=Object.fromEntries(new FormData(e.target));b.resources=b.resources.split(',').map(x=>x.trim()).filter(Boolean);try{await api('/api/tasks',b);e.target.reset();await refresh();}catch(e){notice(e.message,true);}};
+$('pause').onclick=async()=>{try{await api('/api/control',{action:'pause'});await refresh();}catch(e){notice(e.message,true);}};
+$('resume').onclick=async()=>{try{await api('/api/control',{action:'resume'});await refresh();}catch(e){notice(e.message,true);}};
+$('logout').onclick=async()=>{try{await api('/api/logout',{});csrf='';$('secret').textContent='';$('secret').hidden=true;await refresh();}catch(e){notice(e.message,true);}};
+refresh().catch(e=>notice(e.message,true));timer=setInterval(()=>{if(!document.querySelector('textarea:focus,input:focus'))refresh().catch(e=>notice(e.message,true));},5000);
+</script></html>

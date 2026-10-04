@@ -1,0 +1,13 @@
+# Project-local RTK, Ponytail, and Headroom setup
+/.tools/
+/.agents/
+/.codex/
+/AGENTS.md
+/RTK.md
+/README.md
+/headroom-requirements.txt
+/scripts/rtk
+/scripts/rtk-hook.py
+/scripts/headroom
+__pycache__/
+*.py[cod]
