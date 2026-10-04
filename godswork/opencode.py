@@ -20,22 +20,29 @@ def require_ubuntu_vm():
         result = subprocess.run(["systemd-detect-virt", "--vm"], capture_output=True,
                                 text=True, timeout=5, check=False)
     except (OSError, subprocess.TimeoutExpired) as error:
-        raise ValueError("Cannot verify worker VM. Run inside a dedicated Ubuntu VM with systemd-detect-virt installed.") from error
+        raise ValueError("Cannot verify agent VM. Run inside a dedicated Ubuntu VM with systemd-detect-virt installed.") from error
     hypervisor = result.stdout.strip()
     if result.returncode != 0 or hypervisor in ("", "none", "wsl") or "wsl" in platform.release().lower():
-        raise ValueError("OpenCode workers require a dedicated Ubuntu VM; run this command inside the guest.")
+        raise ValueError("Agents and coordinator require a dedicated Ubuntu VM; run this command inside the guest.")
     try:
         distribution = platform.freedesktop_os_release().get("ID")
     except OSError as error:
         raise ValueError("Cannot verify Ubuntu guest OS; check /etc/os-release inside the VM.") from error
     if distribution != "ubuntu":
-        raise ValueError("OpenCode worker guest OS must be Ubuntu (os-release ID=ubuntu).")
+        raise ValueError("Agent and coordinator guest OS must be Ubuntu (os-release ID=ubuntu).")
+    return hypervisor
+
+
+def require_root_ubuntu_vm():
+    hypervisor = require_ubuntu_vm()
+    if os.geteuid() != 0:
+        raise ValueError("OpenCode agents must run as root inside their Ubuntu VM. Use a root shell inside the guest.")
     return hypervisor
 
 
 class OpenCode:
-    def __init__(self, directory: Path, model: str, mcp_command: list[str], mcp_environment=None):
-        require_ubuntu_vm()
+    def __init__(self, directory: Path, model: str, mcp_command: list[str], mcp_environment=None, local_tools=True):
+        require_root_ubuntu_vm()
         if not model.startswith("opencode/"):
             raise ValueError("Only anonymous OpenCode models are permitted")
         self.directory = directory.resolve()
@@ -46,6 +53,9 @@ class OpenCode:
             self.port = sock.getsockname()[1]
         # An allowlist avoids inheriting unrelated provider credentials/config.
         environment = {key: os.environ[key] for key in ("PATH", "LANG", "LC_ALL", "TERM", "TMPDIR") if key in os.environ}
+        permission = {"*": "deny", "godswork_*": "allow"}
+        if local_tools:
+            permission |= {name: "allow" for name in ("bash", "read", "edit", "glob", "grep", "list", "external_directory", "webfetch", "websearch", "skill")}
         environment |= {
             "HOME": str(self.directory),
             "XDG_CONFIG_HOME": str(self.directory / "config"),
@@ -59,7 +69,7 @@ class OpenCode:
             "OPENCODE_CONFIG_CONTENT": json.dumps({
                 "model": model, "autoupdate": False, "share": "disabled",
                 "enabled_providers": ["opencode"], "snapshot": False,
-                "permission": {"*": "deny", "godswork_*": "allow"},
+                "permission": permission,
                 "mcp": {"godswork": {"type": "local", "command": mcp_command,
                     "environment": mcp_environment or {}, "enabled": True, "timeout": 180000}},
             }),

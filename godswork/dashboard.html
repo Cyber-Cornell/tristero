@@ -9,11 +9,11 @@
 <div id="notice" role="status"></div>
 <form id="login"><h2>Sign in</h2><label>Competitor <input name="username" autocomplete="username" required></label><label>Password <input name="password" type="password" autocomplete="current-password" required></label><button>Sign in</button></form>
 <main id="main" hidden>
-<div class="row"><button id="pause">Pause all workers</button><button id="resume">Resume dispatch</button><button id="logout">Sign out</button></div>
+<div class="row"><button id="pause">Pause all agents</button><button id="resume">Resume dispatch</button><button id="logout">Sign out</button></div>
 <div id="banner"></div>
-<nav class="row"><a href="#services">Services</a><a href="#workers">Workers</a><a href="#tasks">Tasks</a><a href="#injects">Injects</a><a href="#vault">Credentials</a></nav>
+<nav class="row"><a href="#services">Services</a><a href="#workers">Agents</a><a href="#tasks">Tasks</a><a href="#injects">Injects</a><a href="#vault">Credentials</a></nav>
 <h2 id="services">Service status</h2><div id="service-list"></div>
-<h2 id="workers">Workers</h2><div id="worker-list"></div>
+<h2 id="workers">Agents</h2><div id="worker-list"></div>
 <h2 id="tasks">Tasks and discussion</h2>
 <form id="newtask"><label>Title <input name="title" required></label><label>Targets (comma-separated IDs) <input name="resources" required></label><label>Instructions <textarea name="instructions" required></textarea></label><button>Create task</button></form>
 <div id="task-list"></div>
@@ -36,7 +36,7 @@ async function refresh(){try{state=await api('/api/state');}catch(e){if(!csrf){$
  $('banner').textContent=(state.settings.paused?'PAUSED — new remote operations blocked.':'Dispatch active.')+' Signed in as '+state.user+'. '+(state.portal_error?'Portal: '+state.portal_error:'');
  $('template-status').textContent=state.template_ready?'Team template loaded. Competitors review and submit drafts manually.':'Supply the actual team template to enable inject drafting.';
  table('service-list',['Service','Status','Target','Dependencies','Last observation'],state.services.map(s=>[s.id,s.status,s.target,s.depends_on.join(', '),s.observed_at?new Date(s.observed_at*1000).toLocaleTimeString():'No observation']));
- table('worker-list',['Worker','Connection','Status','Controls'],state.workers.map(w=>[w.id,w.revoked?'revoked':w.online?'online':'offline',w.stopped?'stopped':w.status,controls(button('Stop',()=>api('/api/control',{action:'stop',id:w.id})),button('Restart dispatch',()=>api('/api/control',{action:'restart',id:w.id})),button('Revoke',()=>api('/api/control',{action:'revoke',id:w.id})))]));
+ table('worker-list',['Agent','Role','Connection','Status','Controls'],state.workers.map(w=>[w.id,w.role||'worker',w.revoked?'revoked':w.online?'online':'offline',w.stopped?'stopped':w.status,controls(button('Stop',()=>api('/api/control',{action:'stop',id:w.id})),button('Restart dispatch',()=>api('/api/control',{action:'restart',id:w.id})),button('Revoke',()=>api('/api/control',{action:'revoke',id:w.id})))]));
  const open=new Set([...$('task-list').querySelectorAll('details[open]')].map(n=>n.dataset.id));
  $('task-list').replaceChildren(...state.tasks.slice().reverse().map(t=>{const d=node('details');d.dataset.id=t.id;d.open=open.has(t.id);d.append(node('summary',t.title+' · '+t.state+' · '+t.resources.join(', ')),node('small',t.id),node('pre',t.instructions),node('pre',JSON.stringify(t.participants,null,2)));if(t.reason)d.append(node('p',t.reason));state.messages.filter(m=>m.task===t.id).forEach(m=>d.append(node('p',m.author+': '+m.text)));const f=node('form'),input=node('textarea');input.placeholder='Message competitors and agents';input.setAttribute('aria-label','Task message');f.append(input,node('button','Post message'));f.onsubmit=async e=>{e.preventDefault();try{await api('/api/thread',{task:t.id,text:input.value});await refresh();}catch(e){notice(e.message,true);}};d.append(f);
  state.operations.filter(o=>o.task===t.id).forEach(o=>{const evidence=node('details');evidence.append(node('summary','Evidence '+o.id+' · '+o.target+' · '+o.state),node('pre',o.command),node('pre',JSON.stringify(o.result||{},null,2)));d.append(evidence);});

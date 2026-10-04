@@ -12,6 +12,9 @@ from .remote import execute, rotation_command
 
 class Coordinator:
     def __init__(self, config):
+        self.role = config.get("role", "worker")
+        if self.role not in ("worker", "coordinator"):
+            raise ValueError("Invalid agent role")
         url = config["coordinator"]
         if not url.startswith("https://") and not (config.get("insecure_local") and url.startswith("http://127.0.0.1:")):
             raise ValueError("Coordinator HTTPS required; HTTP is limited to explicit loopback development")
@@ -20,7 +23,7 @@ class Coordinator:
                                    verify=verification, timeout=20, trust_env=False)
 
     def call(self, endpoint, **body):
-        response = self.client.post("/api/worker/" + endpoint, json=body)
+        response = self.client.post("/api/" + self.role + "/" + endpoint, json=body)
         response.raise_for_status()
         return response.json()
 

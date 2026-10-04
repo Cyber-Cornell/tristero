@@ -30,24 +30,35 @@ def main():
     commands = parser.add_subparsers(dest="command", required=True)
     p = commands.add_parser("init"); p.add_argument("username")
     p = commands.add_parser("user"); p.add_argument("username")
-    p = commands.add_parser("enroll"); p.add_argument("id"); p.add_argument("--url", required=True); p.add_argument("--ca", type=Path); p.add_argument("--out", type=Path, required=True); p.add_argument("--insecure-local", action="store_true")
+    p = commands.add_parser("enroll"); p.add_argument("id"); p.add_argument("--url", required=True); p.add_argument("--ca", type=Path); p.add_argument("--out", type=Path, required=True); p.add_argument("--insecure-local", action="store_true"); p.add_argument("--coordinator", action="store_true")
     p = commands.add_parser("inventory"); p.add_argument("path", type=Path)
     p = commands.add_parser("credential"); p.add_argument("id"); p.add_argument("path", type=Path)
     p = commands.add_parser("serve"); p.add_argument("--host", default="127.0.0.1"); p.add_argument("--port", type=int, default=8443); p.add_argument("--cert", type=Path); p.add_argument("--key", type=Path); p.add_argument("--portal"); p.add_argument("--template", type=Path); p.add_argument("--insecure-local", action="store_true")
     p = commands.add_parser("fixture"); p.add_argument("--path", type=Path, default=ROOT / "examples/portal.json"); p.add_argument("--port", type=int, default=8088)
     p = commands.add_parser("smoke"); p.add_argument("--model", default="opencode/space-bunny-free")
     p = commands.add_parser("worker"); p.add_argument("config", type=Path); p.add_argument("--model", default="opencode/space-bunny-free")
+    p = commands.add_parser("coordinator"); p.add_argument("config", type=Path); p.add_argument("--model", default="opencode/space-bunny-free")
     p = commands.add_parser("preflight"); p.add_argument("config", type=Path)
     commands.add_parser("tools")
+    commands.add_parser("coordinator-tools")
     p = commands.add_parser("backup"); p.add_argument("path", type=Path)
     p = commands.add_parser("export-vault"); p.add_argument("path", type=Path)
     args = parser.parse_args()
+    if args.command == "serve":
+        from .opencode import require_ubuntu_vm
+        require_ubuntu_vm()
     if args.command == "smoke":
         from .smoke import smoke
         smoke(args.model); return
     if args.command == "worker":
         from .worker import run_worker
         run_worker(args.config, args.model); return
+    if args.command == "coordinator":
+        from .coordinator import run_coordinator
+        run_coordinator(args.config, args.model); return
+    if args.command == "coordinator-tools":
+        from .coordinator import serve_tools
+        serve_tools(); return
     if args.command == "preflight":
         from .worker import preflight
         preflight(args.config); return
@@ -85,11 +96,11 @@ def main():
             raise ValueError("Enrollment output already exists")
         from .tools import Coordinator
         config = {"id": args.id, "coordinator": args.url, "ca_file": str(args.ca.resolve()) if args.ca else None,
-                  "insecure_local": args.insecure_local, "token": "validation"}
+                  "insecure_local": args.insecure_local, "token": "validation", "role": "coordinator" if args.coordinator else "worker"}
         Coordinator(config).client.close()
-        config["token"] = store.enroll(args.id)
+        config["token"] = store.enroll(args.id, role=config["role"])
         private_file(args.out, json.dumps(config, indent=2))
-        print("Worker token saved to " + str(args.out) + "; copy securely, chmod 600, and adjust worker-local CA path.")
+        print("Agent token saved to " + str(args.out) + "; copy securely, chmod 600, and adjust guest-local CA path.")
     elif args.command == "inventory":
         store.inventory(json.loads(args.path.read_text()))
     elif args.command == "credential":

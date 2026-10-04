@@ -29,7 +29,7 @@ def smoke(model: str):
         directory = run / str(index)
         nonce = secrets.token_hex(16)
         engine = OpenCode(directory, model, [sys.executable, "-m", "godswork.smoke"],
-                          {"PYTHONPATH": str(ROOT)})
+                          {"PYTHONPATH": str(ROOT)}, local_tools=False)
         try:
             session = engine.session("Anonymous tool-use check")
             reply = engine.prompt(session, f'Call godswork_probe with nonce "{nonce}" and return its exact result. '

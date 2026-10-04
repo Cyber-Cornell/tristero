@@ -14,7 +14,7 @@ from godswork.app import create_app
 from godswork.config import Target
 from godswork.store import Store, Conflict, Forbidden
 from godswork.tools import Tools
-from godswork.opencode import ROOT, OpenCode, require_ubuntu_vm
+from godswork.opencode import ROOT, OpenCode, require_ubuntu_vm, require_root_ubuntu_vm
 
 
 class HarnessTest(unittest.TestCase):
@@ -268,7 +268,7 @@ class HarnessTest(unittest.TestCase):
                 return 'Verified '+target
             def close(self):pass
             def abort(self,session):pass
-        with patch('godswork.worker.require_ubuntu_vm',return_value='kvm'),patch('godswork.worker.ROOT',self.path),patch('godswork.worker.Coordinator',LocalCoordinator),patch('godswork.worker.OpenCode',LocalEngine):
+        with patch('godswork.worker.require_root_ubuntu_vm',return_value='kvm'),patch('godswork.worker.ROOT',self.path),patch('godswork.worker.Coordinator',LocalCoordinator),patch('godswork.worker.OpenCode',LocalEngine):
             with ThreadPoolExecutor(max_workers=2) as pool:
                 futures=[pool.submit(run_worker,self.path/(w+'.json'),'opencode/space-bunny-free') for w in ('linux-student','ad-student')]
                 for future in futures:future.result(timeout=20)
@@ -295,10 +295,120 @@ class HarnessTest(unittest.TestCase):
 
     def test_worker_and_preflight_reject_host_before_contacting_coordinator(self):
         from godswork.worker import preflight,run_worker
-        with patch('godswork.worker.require_ubuntu_vm',side_effect=ValueError('Ubuntu VM required')),patch('godswork.worker.Coordinator') as coordinator:
+        with patch('godswork.worker.require_root_ubuntu_vm',side_effect=ValueError('Root Ubuntu VM required')),patch('godswork.worker.Coordinator') as coordinator:
             with self.assertRaises(ValueError):preflight(self.path/'absent.json')
             with self.assertRaises(ValueError):run_worker(self.path/'absent.json','opencode/space-bunny-free')
             coordinator.assert_not_called()
+
+    def test_opencode_rejects_non_root_guest_before_launch(self):
+        with patch('godswork.opencode.require_ubuntu_vm',return_value='kvm'),patch('godswork.opencode.os.geteuid',return_value=1000),patch('godswork.opencode.subprocess.Popen') as launch:
+            with self.assertRaises(ValueError):OpenCode(self.path/'engine','opencode/space-bunny-free',[])
+            launch.assert_not_called();self.assertFalse((self.path/'engine').exists())
+        with patch('godswork.opencode.require_ubuntu_vm',return_value='kvm'),patch('godswork.opencode.os.geteuid',return_value=0):
+            self.assertEqual(require_root_ubuntu_vm(),'kvm')
+
+    def test_coordinator_serve_rejects_host_before_unlocking_vault(self):
+        from godswork.__main__ import main
+        with patch('sys.argv',['godswork','serve']),patch('godswork.opencode.require_ubuntu_vm',side_effect=ValueError('Ubuntu VM required')),patch('godswork.__main__.key_prompt') as key:
+            with self.assertRaises(ValueError):main()
+            key.assert_not_called()
+
+    def test_root_agent_local_tools_and_restricted_probe_permissions(self):
+        from godswork.opencode import VERSION
+        for local_tools in (True,False):
+            with patch('godswork.opencode.require_root_ubuntu_vm',return_value='kvm'),patch('godswork.opencode.subprocess.check_output',return_value=VERSION),patch('godswork.opencode.subprocess.Popen') as launch,patch('godswork.opencode.httpx.Client') as client,patch('os.killpg'):
+                launch.return_value.poll.return_value=None
+                client.return_value.get.return_value.is_success=True
+                client.return_value.request.return_value.content=b'json'
+                client.return_value.request.return_value.json.return_value={'all':[{'id':'opencode','models':{'space-bunny-free':{'cost':{'input':0,'output':0}}}}]}
+                engine=OpenCode(self.path/'engine','opencode/space-bunny-free',[],local_tools=local_tools)
+                try:
+                    configuration=json.loads(launch.call_args.kwargs['env']['OPENCODE_CONFIG_CONTENT'])
+                    self.assertEqual(configuration['permission'].get('bash','deny'),'allow' if local_tools else 'deny')
+                    self.assertEqual(configuration['permission']['godswork_*'],'allow')
+                    self.assertEqual(configuration['enabled_providers'],['opencode'])
+                finally:engine.close()
+
+    def test_coordinator_token_dispatch_and_human_only_actions(self):
+        token=self.store.enroll('team-coordinator',role='coordinator')
+        client=TestClient(self.app,headers={'Authorization':'Bearer '+token});self.addCleanup(client.close)
+        self.assertEqual(client.post('/api/worker/context',json={}).status_code,403)
+        self.assertEqual(self.client.post('/api/coordinator/context',json={},headers={'Authorization':'Bearer '+self.linux_token}).status_code,403)
+        state=client.post('/api/coordinator/context',json={}).json()
+        self.assertNotIn('ADOld!123',json.dumps(state));self.assertNotIn(token,json.dumps(state))
+        body={'title':'Coordinate AD login','instructions':'Verify both sides of the authentication dependency.','resources':['ad','linux']}
+        task=client.post('/api/coordinator/dispatch',json=body)
+        self.assertEqual(task.status_code,200);self.assertEqual(task.json()['source'],'team-coordinator')
+        self.assertEqual(client.post('/api/coordinator/dispatch',json=body).status_code,409)
+        self.assertEqual(client.post('/api/coordinator/dispatch',json=body|{'resources':['unknown']}).status_code,422)
+        self.assertEqual(client.post('/api/coordinator/dispatch',json=body|{'resources':{'linux':True}}).status_code,422)
+        self.assertEqual(client.post('/api/coordinator/message',json={'task':task.json()['id'],'text':'Discuss the dependency without exposing ADOld!123.'}).status_code,200)
+        self.assertNotIn('ADOld!123',json.dumps(self.store.snapshot()['messages']))
+        for action in ('credential','operation_start','review','control'):
+            self.assertEqual(client.post('/api/coordinator/'+action,json={}).status_code,422)
+        self.store.control('captain','pause')
+        self.assertEqual(client.post('/api/coordinator/dispatch',json=body).status_code,403)
+        self.assertEqual(client.post('/api/coordinator/context',json={}).status_code,200)
+        self.store.control('captain','stop','team-coordinator')
+        self.assertEqual(client.post('/api/coordinator/context',json={}).status_code,403)
+
+    def test_coordinator_inject_assignment_uses_actual_template(self):
+        token=self.store.enroll('team-coordinator',role='coordinator')
+        self.store.observe({'generated_at':time.time(),'services':[],'injects':[{'id':'I-2','title':'Health report','instructions':'Check Nginx','deadline':'today'}]})
+        template=self.path/'team.md';template.write_text('$title\n$response\n$evidence')
+        for app,expected in ((self.app,409),(create_app(self.store,template_path=template),200)):
+            with TestClient(app,headers={'Authorization':'Bearer '+token}) as client:
+                self.assertEqual(client.post('/api/coordinator/assign_inject',json={'inject':'I-2','resources':['linux']}).status_code,expected)
+        self.assertEqual(self.store.snapshot()['injects'][0]['state'],'assigned')
+
+    def test_coordinator_loop_dispatches_through_authenticated_api(self):
+        import threading
+        from godswork.coordinator import run_coordinator
+        from godswork.opencode import VERSION
+        from godswork.tools import Coordinator
+        token=self.store.enroll('team-coordinator',role='coordinator')
+        config={'id':'team-coordinator','role':'coordinator','token':token,'coordinator':'http://127.0.0.1:8443','insecure_local':True}
+        file=self.path/'coordinator.json';file.write_text(json.dumps(config));file.chmod(0o600)
+        (self.path/'.tools/data').mkdir(parents=True)
+        (self.path/'.tools/data/anonymous-check.json').write_text(json.dumps({'model':'opencode/space-bunny-free','version':VERSION,'checked_at':time.time()}))
+        agent=Coordinator(config);agent.client.close()
+        agent.client=TestClient(self.app,headers={'Authorization':'Bearer '+token});self.addCleanup(agent.client.close)
+        class Engine:
+            def __init__(self,*args):pass
+            def session(self,title):return 'session'
+            def prompt(self,session,prompt):
+                agent.call('dispatch',title='Service inspection',instructions='Check Nginx and record evidence.',resources=['linux'])
+                return 'Dispatched inspection'
+            def close(self):pass
+            def abort(self,session):pass
+        event_type=threading.Event
+        def event():
+            instance=event_type();original_wait=instance.wait
+            def wait(timeout=None):
+                if timeout==30:raise KeyboardInterrupt()
+                return original_wait(timeout)
+            instance.wait=wait
+            return instance
+        with patch('godswork.coordinator.ROOT',self.path),patch('godswork.coordinator.require_root_ubuntu_vm',return_value='kvm'),patch('godswork.coordinator.Coordinator',return_value=agent),patch('godswork.coordinator.OpenCode',Engine),patch('godswork.coordinator.threading.Event',side_effect=event):
+            run_coordinator(file,'opencode/space-bunny-free')
+        task=self.store.snapshot()['tasks'][0]
+        self.assertEqual(task['source'],'team-coordinator');self.assertEqual(task['resources'],['linux'])
+
+    def test_coordinator_decisions_ignore_heartbeat_timestamps(self):
+        from godswork.coordinator import decision_state
+        state=self.store.snapshot()|{'template_ready':False}
+        first=decision_state(state)
+        state['workers'][0]['seen']=time.time()
+        state['services'][0]['observed_at']=time.time()
+        self.assertEqual(first,decision_state(state))
+        state['services'][0]['status']='down'
+        self.assertNotEqual(first,decision_state(state))
+
+    def test_coordinator_launch_requires_root_ubuntu_vm_before_network(self):
+        from godswork.coordinator import run_coordinator
+        with patch('godswork.coordinator.require_root_ubuntu_vm',side_effect=ValueError('Root Ubuntu VM required')),patch('godswork.coordinator.Coordinator') as client,patch('godswork.coordinator.OpenCode') as engine:
+            with self.assertRaises(ValueError):run_coordinator(self.path/'missing.json','opencode/space-bunny-free')
+            client.assert_not_called();engine.assert_not_called()
 
 
 if __name__ == '__main__':

@@ -1,18 +1,21 @@
 # Godswork competition lab harness
 
-A coordinator on one competitor's Linux/WSL2 laptop dispatches autonomous OpenCode workers running inside dedicated Ubuntu VMs to assigned remote hosts. Each competitor hosts a worker VM on their laptop; the worker VM is separate from the Windows AD and Ubuntu machines being defended. SQLite stores tasks, host locks, service dependencies, discussion, evidence, and an encrypted credential vault. Competitors review inject drafts and submit them themselves.
+A dedicated Ubuntu coordinator VM runs the Python control plane and a root OpenCode coordinator agent. Each competitor hosts a separate Ubuntu worker VM running a root OpenCode agent to manage assigned remote hosts. These agent VMs are separate from the Windows AD and Ubuntu machines being defended. SQLite stores tasks, host locks, service dependencies, discussion, evidence, and an encrypted credential vault. Competitors review inject drafts and submit them themselves.
 
 The initial pilot covers Ubuntu/Nginx/SSSD and Windows AD. Router skills and real competition portal adapters are deferred. No external inject submission or paid-model fallback is implemented.
 
 ## Install and verify anonymous access
 
-Workers require a dedicated Ubuntu VM with Python 3.11+, OpenSSH, `systemd-detect-virt`, and internet access. Linux, Windows, and macOS laptops can host the Ubuntu guest through their hypervisor. Run all worker installation, anonymous smoke checks, preflight, and worker commands **inside the guest**. The coordinator can run on the competitor's Linux/WSL2 host because it does not run OpenCode. Installation and runtime state stay under `.tools/`; nothing changes global agent configuration.
+The coordinator and workers require dedicated Ubuntu VMs with Python 3.11+, OpenSSH, `systemd-detect-virt`, and internet access. Linux, Windows, and macOS laptops can host the Ubuntu guests through their hypervisor. Run all installation, anonymous smoke checks, preflight, and agent commands **inside the guest**. Every OpenCode process runs as root, including the coordinator and smoke checks. Harness dependencies and runtime state stay under `.tools/`; agents may also install system packages inside their own VM using their root shell tools.
 
-Create one Ubuntu worker guest per competitor using the team's existing hypervisor. Clone a clean guest before enrollment, then give each clone its own hostname, enrollment token, and `.tools/` state. Take a clean snapshot before importing credentials. Disable shared host folders, clipboard, drag-and-drop, and device passthrough. Keep the repo, remote-execution tools, model transcripts, and worker credentials in the guest. Configure networking for the coordinator, assigned lab targets, and approved anonymous AI endpoints; verify the required routes from inside the VM. VM provisioning and hypervisor networking remain team-managed.
+Create an Ubuntu coordinator guest plus one Ubuntu worker guest per competitor using the team's existing hypervisor. Clone clean guests before enrollment, then give each clone its own hostname, enrollment token, and `.tools/` state. Take clean snapshots before importing credentials. Disable shared host folders, clipboard, drag-and-drop, and device passthrough. Keep the repo, tools, model transcripts, and credentials in the guests. Configure networking for the coordinator, assigned lab targets, and approved anonymous AI endpoints; verify required routes inside the VMs. VM provisioning and hypervisor networking remain team-managed.
 
-Worker startup, preflight, and every native OpenCode launch require both `systemd-detect-virt --vm` to identify a VM and `os-release` to report `ID=ubuntu`. Other guest distributions, bare-metal hosts, WSL, and environments without working detection are rejected, with no host-mode override. Containers alone do not meet this requirement. Detection is a deployment guard, not an attestation of hypervisor isolation or network policy.
+Coordinator service startup, agent startup, preflight, and every native OpenCode launch require both `systemd-detect-virt --vm` to identify a VM and `os-release` to report `ID=ubuntu`. OpenCode agents and preflight additionally require effective UID 0. Other guest distributions, bare-metal hosts, WSL, non-root agent execution, and environments without working detection are rejected. Containers alone do not meet this requirement. Detection is a deployment guard, not an attestation of hypervisor isolation or network policy.
 
 ```bash
+# Inside each Ubuntu guest, enter a root shell and the guest-local checkout:
+sudo -i
+cd /path/to/godswork
 python3 scripts/setup-harness
 ./scripts/godswork smoke
 ```
@@ -31,7 +34,7 @@ The installer pins OpenCode **1.18.34**, verifies its release archive digest, an
 
 ## Coordinator setup
 
-Initialize an individual dashboard account. Save the generated vault key offline: it is printed once and is not saved to disk. Every administrative CLI invocation and coordinator startup prompts for that key.
+Run this section inside the coordinator's Ubuntu VM. Initialize an individual dashboard account. Save the generated vault key offline: it is printed once and is not saved to disk. Every administrative CLI invocation and control-plane startup prompts for that key.
 
 ```bash
 ./scripts/godswork init captain
@@ -82,9 +85,20 @@ cp examples/portal.json .tools/config/portal.json
   --portal http://127.0.0.1:8088/snapshot
 ```
 
-Open `https://coordinator.lab.test:8443` and sign in. Keep this laptop awake. Workers make outbound coordinator connections; their OpenCode servers bind to localhost and require random HTTP authentication.
+Open `https://coordinator.lab.test:8443` and sign in. Keep the coordinator guest and its host laptop awake. Workers make outbound coordinator connections; every OpenCode server binds to its guest's localhost and requires random HTTP authentication.
 
-Inside **each dedicated Ubuntu worker VM's own checkout**, install, run the anonymous smoke check, securely copy its configuration, then start it:
+Enroll a distinct coordinator-role token and start the OpenCode coordinator in another root terminal inside the same coordinator VM:
+
+```bash
+./scripts/godswork enroll team-coordinator --coordinator \
+  --url https://coordinator.lab.test:8443 --ca .tools/config/tls/cert.pem \
+  --out .tools/config/coordinator-agent.json
+./scripts/godswork coordinator .tools/config/coordinator-agent.json
+```
+
+The coordinator agent reads team status and dependency discussions, dispatches justified work to target owners, and assigns inject drafting when the actual template is present. It reviews state changes every 30 seconds and maintains a persistent OpenCode session. Heartbeats and poll timestamps alone do not trigger model calls. Model failures back off without changing providers or releasing locks. Its token can be stopped or revoked through the dashboard alongside worker tokens; pausing blocks dispatch. The coordinator API exposes metadata, scheduling, and discussion rather than credential reads, remote execution, lock release, or inject submission.
+
+Inside **each dedicated Ubuntu worker VM's own checkout**, enter a root shell, install, run the anonymous smoke check, securely copy its configuration, then start it:
 
 ```bash
 chmod 600 .tools/config/linux-worker.json
@@ -97,7 +111,7 @@ Explicit loopback-only development without TLS is available with `serve --insecu
 
 ## Tasks, dependencies, and opening playbook
 
-Create tasks in the dashboard, naming target IDs and precise desired outcomes. A task involving both `ad` and `linux` is shared by their owners and locks both targets. Each worker executes only on its own assigned targets. Participants coordinate through the task thread and a readiness barrier; the locks release when everyone completes with recorded remote evidence.
+Create tasks in the dashboard or let the OpenCode coordinator dispatch them, naming target IDs and precise desired outcomes. A task involving both `ad` and `linux` is shared by their owners and locks both targets. Worker MCP remote-execution tools check target assignments and task locks. Participants coordinate through the task thread and a readiness barrier; the locks release when everyone completes with recorded remote evidence. Native local tools run as guest root so agents can install software they need.
 
 For an opening exercise, use targets `ad,linux` and instructions such as:
 
@@ -128,7 +142,7 @@ Remote exceptions, expired leases, stop/revoke, and pauses retain host locks and
 
 Backups contain the encrypted vault, users, worker-token hashes, and coordination state; keep the separate vault key offline. Recovery exports are plaintext, mode 600, and include pending passwords. Secure them offline and remove local copies afterward. A full recovery uses the same database and vault key; replace the default DB while the coordinator is stopped, or start with `./scripts/godswork --db PATH serve ...`. Workers reconnect, and expired active tasks retain their locks.
 
-Passwords are allowed in model context under the chosen team policy. Shared threads and ordinary coordinator logs redact known active, historical, and pending passwords. OpenCode stores model transcripts locally; those may contain passwords and follow the selected provider's data-use policy. Protect worker state and enrollment files. The vault key itself is never sent to workers or models. Assignment enforcement protects tool calls; remote administrative access is not a network sandbox and cannot prevent an administrator from reaching other hosts through an assigned system.
+Passwords are allowed in worker model context under the chosen team policy. Shared threads and ordinary coordinator logs redact known active, historical, and pending passwords. OpenCode stores model transcripts locally; those may contain passwords and follow the selected provider's data-use policy. Protect guest state and enrollment files. The vault key is not supplied through model prompts or MCP tools. Root agents have administrative access to their guest, including local files and processes; the coordinator agent shares a guest with the control plane. MCP assignment checks and token roles constrain those API calls, but guest root can use native tools directly. Enforce host separation and target network boundaries through the hypervisor/network configuration.
 
 ## Actual team inject template
 
@@ -147,10 +161,10 @@ PYTHONPYCACHEPREFIX="$PWD/.tools/cache/pycache" .tools/harness-venv/bin/python -
 ./scripts/godswork smoke
 ```
 
-Tests exercise concurrent claims, scope enforcement, credential access, restart/expiry, failed commands, uncertain rotation, consumer verification, authentication/CSRF, scoreboard deduplication, template prerequisites, encrypted backup, and the worker's coordination barrier. Remote executors are simulated; use the supplied VMs for live acceptance.
+Tests exercise Ubuntu VM/root requirements, native installation permissions, coordinator token roles and dispatch, concurrent claims, scope enforcement, credential access, restart/expiry, failed commands, uncertain rotation, consumer verification, authentication/CSRF, scoreboard deduplication, template prerequisites, encrypted backup, and the worker's coordination barrier. Model inference and remote executors are simulated in these tests; use the supplied Ubuntu VMs for live acceptance.
 
-Preflight checks Ubuntu guest OS and worker VM detection, coordinator authentication, assignments, management credential presence, local trust files, endpoint reachability, and the WinRM server certificate. It does not claim the SSH host key matches until the first strictly verified SSH connection, or that account login works until a task records it.
+Preflight checks Ubuntu guest OS, worker VM detection, root execution, coordinator authentication, assignments, management credential presence, local trust files, endpoint reachability, and the WinRM server certificate. It does not claim the SSH host key matches until the first strictly verified SSH connection, or that account login works until a task records it.
 
-The coordinator publishes OpenAPI documentation at `/docs`. Worker operations use authenticated `POST /api/worker/{action}` calls: heartbeat, context, claim, view, message, credential, operation_start/finish, ready/complete, rotation_begin/step, and draft. Human endpoints provide login, state, tasks, control, credentials, recovery, and inject review. HTTP errors do not authorize retries of remote mutations.
+The control plane publishes OpenAPI documentation at `/docs`. Worker operations use authenticated `POST /api/worker/{action}` calls: heartbeat, context, claim, view, message, credential, operation_start/finish, ready/complete, rotation_begin/step, and draft. Coordinator-role tokens use `POST /api/coordinator/{action}`: heartbeat, context, dispatch, message, and assign_inject. Human endpoints provide login, state, tasks, control, credentials, recovery, and inject review. HTTP errors do not authorize retries of remote mutations.
 
 The portal adapter expects a JSON `/snapshot` response with `generated_at` (Unix seconds), services (`id`, `status`: up/down/unknown), and injects (`id`, `title`, `instructions`, `deadline`). A real event adapter must normalize its authenticated API/pages into that shape and retain source timestamps. No real event login or scraper is included because none was supplied. Verify that event's automation and AI rules before competition use.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Install only inside this checkout; Linux coordinator or Ubuntu worker VM."""
+"""Install harness dependencies inside this checkout in an Ubuntu agent VM."""
 import hashlib
 import json
 import os
@@ -17,7 +17,7 @@ VERSION = "1.18.34"
 
 def main():
     if sys.version_info < (3, 11) or platform.system() != "Linux":
-        sys.exit("Use Python 3.11+ on Linux. OpenCode workers must run inside dedicated Ubuntu VMs.")
+        sys.exit("Use Python 3.11+ inside an Ubuntu VM. OpenCode coordinator and workers run as guest root.")
     tools = ROOT / ".tools"
     for directory in ("bin", "downloads", "cache/pip"):
         (tools / directory).mkdir(parents=True, exist_ok=True)

@@ -61,6 +61,12 @@ class Inventory(Model):
     services: list[Service]
 
 
+class TaskInput(Model):
+    title: str = Field(min_length=1, max_length=200)
+    instructions: str = Field(min_length=1, max_length=20000)
+    resources: list[str] = Field(min_length=1, max_length=100)
+
+
 class Credential(Model):
     target: str
     username: str = Field(min_length=1, max_length=200)
