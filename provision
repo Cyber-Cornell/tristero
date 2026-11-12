@@ -142,11 +142,15 @@ WantedBy=multi-user.target
 EOF
 
 # Lets the student watch, interrupt, or take over the session the master is driving.
+# Opens the master's session (titled "tristero", newest first) rather than an empty new one.
 cat > /usr/local/bin/tristero-attach <<EOF
 #!/bin/sh
 . /etc/tristero/worker.env
 cd "\$HOME"
-OPENCODE_PASSWORD=\$OPENCODE_SERVER_PASSWORD exec opencode --server http://127.0.0.1:$PORT "\$@"
+export OPENCODE_PASSWORD=\$OPENCODE_SERVER_PASSWORD
+sid=\$(curl -fs -u "opencode:\$OPENCODE_PASSWORD" http://127.0.0.1:$PORT/api/session \\
+  | jq -r '[.data[] | select(.title == "tristero")] | max_by(.time.updated) | .id // empty')
+exec opencode --server http://127.0.0.1:$PORT \${sid:+--session "\$sid"} "\$@"
 EOF
 chmod 755 /usr/local/bin/tristero-attach
 launcher "Tristero worker agent" tristero-attach

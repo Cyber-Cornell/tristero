@@ -91,6 +91,8 @@ deploy() { # copy the repo's runtime files in and run ./provision on each VM, li
   }
   log "provision tr-master"
   provision tr-master master
+  log "firefox on tr-master" # cloud-init blocks the deb; the snap installs fine after first boot
+  ssh_vm tr-master 'snap list firefox >/dev/null 2>&1 || sudo snap install firefox >/dev/null'
   for vm in $(existing); do
     [ "$vm" = tr-master ] && continue
     log "provision $vm"
