@@ -87,7 +87,14 @@ deploy() { # copy the repo's runtime files in and run ./provision on each VM, li
   local vm out line pw; pw=$(cat "$STATE/student-password")
   provision() { # provision VM ROLE [NAME]
     tar -C "$ROOT" -cf - provision agents bin | ssh_vm "$1" 'rm -rf ~/tristero && mkdir ~/tristero && tar -C ~/tristero -xf -'
-    ssh_vm "$1" "cd ~/tristero && echo $pw | sudo -S -p '' ${TRISTERO_MODEL:+TRISTERO_MODEL=$TRISTERO_MODEL} ./provision ${*:2}"
+    ssh_vm "$1" "cd ~/tristero && echo $pw | sudo -S -p '' ${TRISTERO_MODEL:+TRISTERO_MODEL=$TRISTERO_MODEL} ./provision ${*:2}" || return
+    # Lab only: SPICE can't sync Caps Lock from a Wayland host, so the guest's would get stuck on.
+    ssh_vm "$1" 'sudo tee /etc/dconf/db/local.d/01-lab-keyboard >/dev/null &&
+      echo /org/gnome/desktop/input-sources/xkb-options | sudo tee /etc/dconf/db/local.d/locks/lab-keyboard >/dev/null &&
+      sudo dconf update' <<'EOF'
+[org/gnome/desktop/input-sources]
+xkb-options=['caps:none']
+EOF
   }
   log "provision tr-master"
   provision tr-master master

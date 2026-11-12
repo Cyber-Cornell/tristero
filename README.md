@@ -91,6 +91,8 @@ opencode run "Install nginx on worker-1 only and confirm it serves on port 80."
   reported as "Free usage limit reached"). That's why the master keeps read-only file tools.
 - A real free-tier limit gives the same error. All lab VMs share the host's public IP, so if
   it persists, switch models with `TRISTERO_MODEL=opencode/<model> lab/lab deploy`.
+- Lab VMs have Caps Lock disabled (use Shift). SPICE can't sync Caps Lock from a Wayland
+  host, so the guest's state used to get stuck on.
 
 ## Not built yet
 
