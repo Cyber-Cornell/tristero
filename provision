@@ -54,8 +54,35 @@ install_tools() {
   : # Later: the team's standard tool subset (nmap, ...). Agents can already apt-get anything else.
 }
 
+keep_awake() { # the desktop must never sleep, lock, blank, or log out mid-competition
+  step "desktop: no sleep, lock, blanking, or logout"
+  systemctl mask -q sleep.target suspend.target hibernate.target hybrid-sleep.target
+  command -v dconf >/dev/null || return 0 # no GNOME, nothing more to do
+  mkdir -p /etc/dconf/profile /etc/dconf/db/local.d/locks
+  printf 'user-db:user\nsystem-db:local\n' > /etc/dconf/profile/user
+  cat > /etc/dconf/db/local.d/00-tristero <<'EOF'
+[org/gnome/desktop/session]
+idle-delay=uint32 0
+
+[org/gnome/desktop/screensaver]
+lock-enabled=false
+idle-activation-enabled=false
+ubuntu-lock-on-suspend=false
+
+[org/gnome/settings-daemon/plugins/power]
+sleep-inactive-ac-type='nothing'
+sleep-inactive-battery-type='nothing'
+idle-dim=false
+EOF
+  # Locked, so per-user settings can't turn any of it back on.
+  awk -F= '/^\[/ { gsub(/[][]/, ""); dir = $0 } /=/ { print "/" dir "/" $1 }' \
+    /etc/dconf/db/local.d/00-tristero > /etc/dconf/db/local.d/locks/tristero
+  dconf update
+}
+
 install_opencode
 install_tools
+keep_awake
 
 step "$ROLE agent for $AGENT_USER (model $MODEL)"
 as_user mkdir -p "$HOME_DIR/.config/opencode/agents"
