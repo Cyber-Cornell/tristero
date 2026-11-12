@@ -26,6 +26,10 @@ write_files:
       [daemon]
       AutomaticLoginEnable=true
       AutomaticLogin=student
+      # Xorg, not Wayland: SPICE copy/paste (spice-vdagent) only works on X11 under GNOME.
+      WaylandEnable=false
 runcmd:
+  - sudo -u student sh -c 'mkdir -p ~/.config && echo yes > ~/.config/gnome-initial-setup-done'
   - systemctl set-default graphical.target
+  - systemctl start spice-vdagentd
   - systemctl start --no-block gdm3
