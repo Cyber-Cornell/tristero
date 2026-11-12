@@ -58,7 +58,9 @@ when the VMs are on different laptops.
 
 On the worker's desktop, open **Tristero worker agent** (or run `tristero-attach`). That's the
 normal OpenCode TUI connected to the worker's own server, showing the session the master is
-driving. Interrupt it with Esc, type new instructions, or carry on by hand in a terminal. The
+driving. Each worker has exactly one such session, titled **tristero**; `fleet` and
+`tristero-attach` both find it by name (whichever runs first creates it), so open it before or
+after giving the master a task. Tasks then appear in it live. Interrupt it with Esc, type new instructions, or carry on by hand in a terminal. The
 worker's prompt says a student's instructions override the master's. The master sees the
 result through `fleet read`.
 

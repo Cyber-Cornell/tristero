@@ -4,11 +4,10 @@
 set -euo pipefail
 
 ROSTER=${FLEET_ROSTER:-${XDG_CONFIG_HOME:-$HOME/.config}/tristero/fleet.json}
-STATE=${FLEET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/tristero/sessions}
 TIMEOUT=${FLEET_TIMEOUT:-900}
 
 die() { echo "fleet: $*" >&2; exit 1; }
-mkdir -p "$STATE" "$(dirname "$ROSTER")"
+mkdir -p "$(dirname "$ROSTER")"
 [ -f "$ROSTER" ] || (umask 077; echo '{"workers": []}' > "$ROSTER")
 
 names() { jq -r '.workers[].name' "$ROSTER"; }
@@ -20,12 +19,13 @@ api() { # api WORKER METHOD PATH [curl args...]
   curl -sS --fail-with-body --connect-timeout 5 -u "opencode:$(field "$w" password)" \
     -H 'content-type: application/json' -X "$m" "$(url "$w")$p" "$@"
 }
-sid() { [ -s "$STATE/$1" ] && cat "$STATE/$1"; }
+# Each worker has one session titled "tristero" (newest wins). fleet and tristero-attach both
+# look it up on the worker, so whichever runs first creates it and the other joins it.
+sid() { api "$1" GET "/api/session?search=tristero&limit=50" --max-time 5 2>/dev/null \
+  | jq -er '[.data[] | select(.title == "tristero")] | max_by(.time.updated) | .id'; }
 busy() { api "$1" GET /api/session/active --max-time 5 | jq -e --arg s "$2" '.data | has($s)' >/dev/null; }
-session() { # one long-lived session per worker, so it remembers earlier tasks
-  local s; s=$(sid "$1") || true
-  if [ -n "$s" ] && api "$1" GET "/api/session/$s" -o /dev/null 2>/dev/null; then echo "$s"; return; fi
-  api "$1" POST /api/session -d '{"title":"tristero","agent":"worker"}' | jq -er .data.id | tee "$STATE/$1"
+session() { # find or create; long-lived, so the worker remembers earlier tasks
+  sid "$1" || api "$1" POST /api/session -d '{"title":"tristero","agent":"worker"}' | jq -er .data.id
 }
 # Messages come newest first; keep those after the latest task we sent.
 SINCE_TASK='.data | (map(.type) | index("user")) as $i | .[:$i]'
@@ -38,7 +38,7 @@ case $cmd in
     tmp=$(mktemp "$ROSTER.XXXX")
     jq --arg n "$1" --arg u "${2%/}" --arg p "$3" \
       '.workers = [.workers[] | select(.name != $n)] + [{name: $n, url: $u, password: $p}]' "$ROSTER" > "$tmp"
-    chmod 600 "$tmp"; mv "$tmp" "$ROSTER"; rm -f "$STATE/$1"
+    chmod 600 "$tmp"; mv "$tmp" "$ROSTER"
     if api "$1" GET /api/info --max-time 5 -o /dev/null 2>/dev/null; then echo "$1: added, reachable"
     else echo "$1: added, but NOT reachable yet (check the URL, password, and network)"; fi ;;
   remove)
@@ -46,7 +46,7 @@ case $cmd in
     url "$1" >/dev/null
     tmp=$(mktemp "$ROSTER.XXXX")
     jq --arg n "$1" '.workers = [.workers[] | select(.name != $n)]' "$ROSTER" > "$tmp"
-    chmod 600 "$tmp"; mv "$tmp" "$ROSTER"; rm -f "$STATE/$1"; echo "$1: removed" ;;
+    chmod 600 "$tmp"; mv "$tmp" "$ROSTER"; echo "$1: removed" ;;
   workers)
     [ -n "$(names)" ] || echo "no workers yet; run: fleet add <name> <url> <password>"
     for w in $(names); do

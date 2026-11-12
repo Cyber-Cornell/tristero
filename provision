@@ -71,6 +71,9 @@ lock-enabled=false
 idle-activation-enabled=false
 ubuntu-lock-on-suspend=false
 
+[org/gnome/desktop/lockdown]
+disable-lock-screen=true
+
 [org/gnome/settings-daemon/plugins/power]
 sleep-inactive-ac-type='nothing'
 sleep-inactive-battery-type='nothing'
@@ -144,14 +147,16 @@ WantedBy=multi-user.target
 EOF
 
 # Lets the student watch, interrupt, or take over the session the master is driving.
-# Opens the master's session (titled "tristero", newest first) rather than an empty new one.
+# Opens the session the master drives (titled "tristero"), creating it if the master hasn't yet.
 cat > /usr/local/bin/tristero-attach <<EOF
 #!/bin/sh
 . /etc/tristero/worker.env
 cd "\$HOME"
 export OPENCODE_PASSWORD=\$OPENCODE_SERVER_PASSWORD
-sid=\$(curl -fs -u "opencode:\$OPENCODE_PASSWORD" http://127.0.0.1:$PORT/api/session \\
+api() { curl -fs -u "opencode:\$OPENCODE_PASSWORD" -H 'content-type: application/json' "\$@"; }
+sid=\$(api "http://127.0.0.1:$PORT/api/session?search=tristero&limit=50" \\
   | jq -r '[.data[] | select(.title == "tristero")] | max_by(.time.updated) | .id // empty')
+[ -n "\$sid" ] || sid=\$(api -X POST http://127.0.0.1:$PORT/api/session -d '{"title":"tristero","agent":"worker"}' | jq -r '.data.id // empty')
 exec opencode --server http://127.0.0.1:$PORT \${sid:+--session "\$sid"} "\$@"
 EOF
 chmod 755 /usr/local/bin/tristero-attach
