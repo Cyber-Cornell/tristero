@@ -14,14 +14,14 @@ Ubuntu 24.04 Desktop VM, and a student sits at each desktop to watch and steer i
 ```
 master VM                                     worker VMs
   opencode (agent: master)                      opencode serve :4096 (agent: worker)
-    └─ shell tool, limited to `fleet` ──HTTP──►   systemd service, runs as the desktop user
+    └─ shell tool ── fleet ──────────HTTP──►   systemd service, runs as the desktop user
                                                   student: tristero-attach to watch / take over
 ```
 
 - **Workers** run `opencode serve` behind a per-worker password. Agents run as the desktop
   user, who has passwordless sudo, so they can install tools and run any command.
-- **The master** can only run `fleet` (plus read-only file tools). It cannot touch machines
-  itself, so all real work goes through the workers.
+- **The master** delegates work on worker machines through `fleet`, and can run any command
+  on its own VM (passwordless sudo) to check results or use tools.
 - **`fleet`** (`bin/fleet`) is the whole orchestration API: `workers`, `send`, `wait`, `read`,
   `log`, `stop`, plus `add`/`remove` for the roster (students only; the master is denied these).
   Each worker gets one long-lived session, so it remembers earlier tasks.
@@ -88,7 +88,7 @@ opencode run "Install nginx on worker-1 only and confirm it serves on port 80."
 ## Known quirks
 
 - OpenCode's free models reject requests from an agent with no `read` tool (HTTP 429,
-  reported as "Free usage limit reached"). That's why the master keeps read-only file tools.
+  reported as "Free usage limit reached"). Keep `read` allowed if you restrict an agent.
 - A real free-tier limit gives the same error. All lab VMs share the host's public IP, so if
   it persists, switch models with `TRISTERO_MODEL=opencode/<model> lab/lab deploy`.
 
