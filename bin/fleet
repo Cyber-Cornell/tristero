@@ -1,0 +1,97 @@
+#!/usr/bin/env bash
+# fleet: the master agent's only tool. Drives each worker's `opencode serve` over HTTP.
+# Roster: {"workers": [{"name": "worker-1", "url": "http://IP:4096", "password": "..."}]}
+set -euo pipefail
+
+ROSTER=${FLEET_ROSTER:-${XDG_CONFIG_HOME:-$HOME/.config}/tristero/fleet.json}
+STATE=${FLEET_STATE:-${XDG_STATE_HOME:-$HOME/.local/state}/tristero/sessions}
+TIMEOUT=${FLEET_TIMEOUT:-900}
+
+die() { echo "fleet: $*" >&2; exit 1; }
+mkdir -p "$STATE" "$(dirname "$ROSTER")"
+[ -f "$ROSTER" ] || (umask 077; echo '{"workers": []}' > "$ROSTER")
+
+names() { jq -r '.workers[].name' "$ROSTER"; }
+field() { jq -er --arg n "$1" --arg f "$2" '.workers[] | select(.name == $n) | .[$f]' "$ROSTER" 2>/dev/null; }
+url() { field "$1" url || die "unknown worker '$1' (see: fleet workers)"; }
+targets() { if [ "$1" = all ]; then names; else url "$1" >/dev/null && echo "$1"; fi; }
+api() { # api WORKER METHOD PATH [curl args...]
+  local w=$1 m=$2 p=$3; shift 3
+  curl -sS --fail-with-body --connect-timeout 5 -u "opencode:$(field "$w" password)" \
+    -H 'content-type: application/json' -X "$m" "$(url "$w")$p" "$@"
+}
+sid() { [ -s "$STATE/$1" ] && cat "$STATE/$1"; }
+busy() { api "$1" GET /api/session/active --max-time 5 | jq -e --arg s "$2" '.data | has($s)' >/dev/null; }
+session() { # one long-lived session per worker, so it remembers earlier tasks
+  local s; s=$(sid "$1") || true
+  if [ -n "$s" ] && api "$1" GET "/api/session/$s" -o /dev/null 2>/dev/null; then echo "$s"; return; fi
+  api "$1" POST /api/session -d '{"title":"tristero","agent":"worker"}' | jq -er .data.id | tee "$STATE/$1"
+}
+# Messages come newest first; keep those after the latest task we sent.
+SINCE_TASK='.data | (map(.type) | index("user")) as $i | .[:$i]'
+
+cmd=${1:-}; shift || true
+case $cmd in
+  add) # paste the line a worker's ./provision printed
+    [ $# -eq 3 ] || die "usage: fleet add <name> <url> <password>"
+    [[ $1 =~ ^[a-z0-9][a-z0-9-]*$ && $1 != all ]] || die "bad worker name '$1'"
+    tmp=$(mktemp "$ROSTER.XXXX")
+    jq --arg n "$1" --arg u "${2%/}" --arg p "$3" \
+      '.workers = [.workers[] | select(.name != $n)] + [{name: $n, url: $u, password: $p}]' "$ROSTER" > "$tmp"
+    chmod 600 "$tmp"; mv "$tmp" "$ROSTER"; rm -f "$STATE/$1"
+    if api "$1" GET /api/info --max-time 5 -o /dev/null 2>/dev/null; then echo "$1: added, reachable"
+    else echo "$1: added, but NOT reachable yet (check the URL, password, and network)"; fi ;;
+  remove)
+    [ $# -eq 1 ] || die "usage: fleet remove <name>"
+    url "$1" >/dev/null
+    tmp=$(mktemp "$ROSTER.XXXX")
+    jq --arg n "$1" '.workers = [.workers[] | select(.name != $n)]' "$ROSTER" > "$tmp"
+    chmod 600 "$tmp"; mv "$tmp" "$ROSTER"; rm -f "$STATE/$1"; echo "$1: removed" ;;
+  workers)
+    [ -n "$(names)" ] || echo "no workers yet; run: fleet add <name> <url> <password>"
+    for w in $(names); do
+      if ! api "$w" GET /api/info --max-time 5 -o /dev/null 2>/dev/null; then st=unreachable
+      elif s=$(sid "$w") && busy "$w" "$s"; then st=busy
+      else st=idle; fi
+      printf '%-12s %-12s %s\n' "$w" "$st" "$(url "$w")"
+    done ;;
+  send)
+    [ $# -eq 2 ] || die 'usage: fleet send <worker|all> "<task>"'
+    ws=$(targets "$1") || exit 1
+    for w in $ws; do
+      if ! s=$(session "$w" 2>/dev/null); then echo "$w: unreachable"
+      elif busy "$w" "$s"; then echo "$w: busy, not sent (fleet wait or fleet stop first)"
+      elif api "$w" POST "/api/session/$s/prompt" -d "$(jq -n --arg t "$2" '{text: $t}')" -o /dev/null; then echo "$w: sent"
+      else echo "$w: send failed"; fi
+    done ;;
+  wait)
+    [ $# -eq 1 ] || die 'usage: fleet wait <worker|all>'
+    ws=$(targets "$1") || exit 1
+    for w in $ws; do
+      (
+        if ! s=$(sid "$w"); then echo "$w: no task sent yet"
+        elif api "$w" POST "/api/experimental/session/$s/wait" --max-time "$TIMEOUT" -o /dev/null 2>/dev/null; then echo "$w: finished"
+        else echo "$w: wait failed (unreachable, or still running after ${TIMEOUT}s)"; fi
+      ) &
+    done
+    wait ;;
+  read|log)
+    [ $# -eq 1 ] || die "usage: fleet $cmd <worker>"
+    url "$1" >/dev/null; s=$(sid "$1") || die "$1: no task sent yet"
+    msgs=$(api "$1" GET "/api/session/$s/message?limit=200")
+    jq -r '.data[0] | if .type == "idle" then "[\(.outcome)]" else "[still running]" end' <<<"$msgs"
+    if [ "$cmd" = read ]; then
+      jq -r "$SINCE_TASK"' | map(select(.type == "assistant" and any(.content[]; .type == "text")))
+        | first // {content: []} | [.content[] | select(.type == "text") | .text] | join("\n")' <<<"$msgs"
+    else
+      jq -r "$SINCE_TASK"' | reverse | .[] | select(.type == "assistant") | .content[] | select(.type == "tool")
+        | "--- \(.name) [\(.state.status)] \(.state.input.command // (.state.input | tojson))\n"
+          + (if .state.content then (.state.content | map(.text // "") | join("")) else (.state.error | tojson) end)[0:2000]' <<<"$msgs"
+    fi ;;
+  stop)
+    [ $# -eq 1 ] || die 'usage: fleet stop <worker>'
+    url "$1" >/dev/null; s=$(sid "$1") || die "$1: no task sent yet"
+    api "$1" POST "/api/session/$s/interrupt" | jq -r --arg w "$1" '"\($w): interrupted=\(.interrupted)"' ;;
+  *)
+    die 'usage: fleet workers | send <worker|all> "<task>" | wait <worker|all> | read <worker> | log <worker> | stop <worker> | add <name> <url> <password> | remove <name>' ;;
+esac

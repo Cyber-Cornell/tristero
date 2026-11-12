@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+# lab: Tristero test lab on local libvirt. One master plus N workers, Ubuntu 24.04 desktops,
+# each set up with ./provision exactly as a student would. Only touches tr-* domains/volumes.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")/.." && pwd)
+STATE=$ROOT/.tools/lab
+IMAGE=$ROOT/.tools/cache/noble.img
+IMAGE_URL=https://cloud-images.ubuntu.com/noble/current
+export LIBVIRT_DEFAULT_URI=qemu:///system
+POOL=default
+BASE=tr-noble-base.qcow2
+WORKERS=${TRISTERO_WORKERS:-2}
+
+die() { echo "lab: $*" >&2; exit 1; }
+log() { echo "==> $*" >&2; }
+vms() { echo tr-master; for i in $(seq 1 "$WORKERS"); do echo "tr-worker-$i"; done; }
+existing() { virsh list --all --name | grep -E '^tr-(master|worker-[0-9]+)$' || true; }
+ip_of() { # newest DHCP lease for the VM's MAC (domifaddr can also list a stale first-boot lease)
+  local mac; mac=$(virsh domiflist "$1" 2>/dev/null | awk '$3 == "default" { print $5; exit }')
+  [ -n "$mac" ] || return 0
+  virsh net-dhcp-leases default --mac "$mac" | awk '$4 == "ipv4" { sub(/\/.*/, "", $5); print $1, $2, $5 }' | sort | tail -1 | cut -d' ' -f3
+}
+vm_name() { case $1 in tr-*) echo "$1" ;; *) echo "tr-$1" ;; esac; }
+ssh_vm() { # ssh_vm VM [command...]  (as the desktop user, student)
+  local ip tty=(); ip=$(ip_of "$1"); [ -n "$ip" ] || die "$1 has no IP (is it running?)"; shift
+  [ -t 0 ] && [ -t 1 ] && tty=(-t)
+  ssh "${tty[@]}" -i "$STATE/id_ed25519" -o UserKnownHostsFile="$STATE/known_hosts" \
+    -o StrictHostKeyChecking=accept-new -o LogLevel=ERROR -o ConnectTimeout=5 "student@$ip" "$@"
+}
+
+ensure_secrets() {
+  mkdir -p "$STATE"; chmod 700 "$STATE"
+  [ -f "$STATE/id_ed25519" ] || ssh-keygen -q -t ed25519 -N '' -C tristero-lab -f "$STATE/id_ed25519"
+  [ -f "$STATE/student-password" ] || (umask 077; openssl rand -hex 8 > "$STATE/student-password")
+}
+
+ensure_base() {
+  virsh vol-info --pool "$POOL" "$BASE" >/dev/null 2>&1 && return
+  if [ ! -f "$IMAGE" ]; then
+    log "downloading Ubuntu 24.04 cloud image"
+    mkdir -p "$(dirname "$IMAGE")"
+    curl -fL -o "$IMAGE.part" "$IMAGE_URL/noble-server-cloudimg-amd64.img"
+    mv "$IMAGE.part" "$IMAGE"
+  fi
+  local want; want=$(curl -fsSL "$IMAGE_URL/SHA256SUMS" | awk '$2 == "*noble-server-cloudimg-amd64.img" { print $1 }')
+  [ "$(sha256sum "$IMAGE" | cut -d' ' -f1)" = "$want" ] || die "image checksum mismatch; delete $IMAGE and retry (a new daily image may have been published)"
+  log "uploading base image to pool $POOL"
+  virsh -q vol-create-as "$POOL" "$BASE" "$(stat -c %s "$IMAGE")" --format qcow2
+  virsh -q vol-upload --pool "$POOL" "$BASE" "$IMAGE"
+}
+
+create_vm() {
+  local vm=$1 dir=$STATE/$1
+  mkdir -p "$dir"
+  sed -e "s|@HOSTNAME@|$vm|" -e "s|@SSH_KEY@|$(cat "$STATE/id_ed25519.pub")|" \
+      -e "s|@PASSWORD@|$(cat "$STATE/student-password")|" "$ROOT/lab/cloud-init.yaml" > "$dir/user-data"
+  printf 'instance-id: %s-%s\nlocal-hostname: %s\n' "$vm" "$(date +%s)" "$vm" > "$dir/meta-data"
+  xorrisofs -o "$dir/seed.iso" -V cidata -J -R "$dir/user-data" "$dir/meta-data" >/dev/null 2>&1 || die "xorrisofs failed for $vm"
+  virsh -q vol-create-as "$POOL" "$vm.qcow2" 20G --format qcow2 --backing-vol "$BASE" --backing-vol-format qcow2
+  virsh -q vol-create-as "$POOL" "$vm-seed.iso" "$(stat -c %s "$dir/seed.iso")" --format raw
+  virsh -q vol-upload --pool "$POOL" "$vm-seed.iso" "$dir/seed.iso"
+  virt-install -q --name "$vm" --memory 3072 --vcpus 2 --cpu host-passthrough \
+    --os-variant ubuntu24.04 --import \
+    --disk "vol=$POOL/$vm.qcow2,bus=virtio" --disk "vol=$POOL/$vm-seed.iso,device=cdrom" \
+    --network network=default,model=virtio \
+    --graphics spice --video virtio --channel spicevmc --noautoconsole
+}
+
+wait_ready() { # IP lease, then SSH, then cloud-init (including the desktop install) finished
+  local vm=$1 st
+  for _ in $(seq 120); do [ -n "$(ip_of "$vm")" ] && break; sleep 2; done
+  [ -n "$(ip_of "$vm")" ] || die "$vm got no IP"
+  # Poll rather than `status --wait`: the desktop install restarts networking and drops SSH.
+  for _ in $(seq 360); do
+    st=$(ssh_vm "$vm" cloud-init status 2>/dev/null | awk '/^status:/ { print $2 }') || true
+    case $st in
+      done) return ;;
+      error) die "$vm cloud-init failed; run: lab/lab ssh ${vm#tr-} cloud-init status --long" ;;
+    esac
+    sleep 5
+  done
+  die "$vm cloud-init did not finish in 30 minutes"
+}
+
+deploy() { # copy the repo's runtime files in and run ./provision on each VM, like a student would
+  local vm out line pw; pw=$(cat "$STATE/student-password")
+  provision() { # provision VM ROLE [NAME]
+    tar -C "$ROOT" -cf - provision agents bin | ssh_vm "$1" 'rm -rf ~/tristero && mkdir ~/tristero && tar -C ~/tristero -xf -'
+    ssh_vm "$1" "cd ~/tristero && echo $pw | sudo -S -p '' ${TRISTERO_MODEL:+TRISTERO_MODEL=$TRISTERO_MODEL} ./provision ${*:2}"
+  }
+  log "provision tr-master"
+  provision tr-master master
+  for vm in $(existing); do
+    [ "$vm" = tr-master ] && continue
+    log "provision $vm"
+    out=$(provision "$vm" worker "${vm#tr-}") || { echo "$out"; die "provision failed on $vm"; }
+    echo "$out"
+    line=$(grep -oP '^\s+\Kfleet add .*' <<<"$out") || die "no 'fleet add' line from $vm"
+    log "on tr-master: fleet add ${vm#tr-} ..."
+    ssh_vm tr-master "$line"
+  done
+  ssh_vm tr-master fleet workers
+}
+
+cmd=${1:-}; shift || true
+case $cmd in
+  up)
+    ensure_secrets; ensure_base
+    for vm in $(vms); do
+      if virsh dominfo "$vm" >/dev/null 2>&1; then virsh -q start "$vm" 2>/dev/null || true
+      else log "creating $vm"; create_vm "$vm"; fi
+    done
+    for vm in $(vms); do log "waiting for $vm (first boot installs the desktop; ~10 min)"; wait_ready "$vm"; done
+    deploy
+    "$0" status ;;
+  deploy) deploy ;;
+  status)
+    for vm in $(existing); do
+      printf '%-14s %-10s %s\n' "$vm" "$(virsh domstate "$vm")" "$(ip_of "$vm")"
+    done
+    [ -f "$STATE/student-password" ] && echo "desktop login: student / $(cat "$STATE/student-password")" ;;
+  ssh)
+    [ $# -ge 1 ] || die "usage: lab ssh <master|worker-N> [command...]"
+    vm=$(vm_name "$1"); shift
+    ssh_vm "$vm" "$@" ;;
+  view)
+    [ $# -eq 1 ] || die "usage: lab view <master|worker-N>"
+    setsid virt-viewer --connect "$LIBVIRT_DEFAULT_URI" "$(vm_name "$1")" >/dev/null 2>&1 & ;;
+  down)
+    for vm in $(existing); do
+      log "removing $vm"
+      virsh -q destroy "$vm" 2>/dev/null || true
+      virsh -q undefine "$vm" --remove-all-storage >/dev/null || true
+      for vol in "$vm.qcow2" "$vm-seed.iso"; do virsh -q vol-delete --pool "$POOL" "$vol" 2>/dev/null || true; done
+      rm -rf "${STATE:?}/$vm"
+    done
+    rm -f "$STATE/known_hosts"
+    if [ "${1:-}" = --all ]; then virsh -q vol-delete --pool "$POOL" "$BASE" 2>/dev/null || true; fi ;;
+  *)
+    die "usage: lab up | deploy | status | ssh <master|worker-N> [cmd...] | view <master|worker-N> | down [--all]" ;;
+esac

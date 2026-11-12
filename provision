@@ -1,0 +1,148 @@
+#!/usr/bin/env bash
+# provision: set up this Ubuntu 24.04 desktop as a Tristero master or worker.
+# Run from a checkout of this repo as the desktop user:
+#   sudo ./provision worker [name]     # prints the line to paste on the master
+#   sudo ./provision master
+# Safe to rerun. Agents run as the desktop user, who gets passwordless sudo.
+set -euo pipefail
+
+ROOT=$(cd "$(dirname "$0")" && pwd)
+ROLE=${1:-}
+WORKER=${2:-$(hostname -s)}
+OC_VERSION=2.2.7
+MODEL=${TRISTERO_MODEL:-opencode/deepseek-v4.1-flash-free}
+PORT=${TRISTERO_PORT:-4096}
+AGENT_USER=${TRISTERO_USER:-${SUDO_USER:-}}
+
+die() { echo "provision: $*" >&2; exit 1; }
+step() { echo "==> $*"; }
+
+[[ $ROLE == master || $ROLE == worker ]] || die "usage: sudo ./provision master|worker [name]"
+[ "$(id -u)" = 0 ] || die "run with sudo"
+[[ -n $AGENT_USER && $AGENT_USER != root ]] || die "run via sudo from the desktop user's account (or set TRISTERO_USER)"
+[[ $WORKER =~ ^[a-z0-9][a-z0-9-]*$ ]] || die "worker name must be lowercase letters, digits, and dashes"
+. /etc/os-release
+[ "$ID" = ubuntu ] || die "Ubuntu only (this is $ID)"
+[ "$VERSION_ID" = 24.04 ] || echo "provision: warning: tested on Ubuntu 24.04, this is $VERSION_ID" >&2
+GROUP=$(id -gn "$AGENT_USER")
+HOME_DIR=$(getent passwd "$AGENT_USER" | cut -d: -f6)
+as_user() { sudo -u "$AGENT_USER" HOME="$HOME_DIR" "$@"; }
+
+step "base packages"
+apt-get update -qq
+DEBIAN_FRONTEND=noninteractive apt-get install -y -qq curl jq ca-certificates openssl >/dev/null
+
+step "passwordless sudo for $AGENT_USER (agents may install and run anything)"
+echo "$AGENT_USER ALL=(ALL) NOPASSWD:ALL" > /etc/sudoers.d/90-tristero
+chmod 440 /etc/sudoers.d/90-tristero
+visudo -cqf /etc/sudoers.d/90-tristero
+
+install_opencode() {
+  if opencode --version 2>/dev/null | grep -q "v$OC_VERSION\$"; then return; fi
+  step "OpenCode $OC_VERSION"
+  local meta tmp; tmp=$(mktemp -d)
+  meta=$(curl -fsSL "https://registry.npmjs.org/@opencode/cli-linux-x64/$OC_VERSION")
+  curl -fsSL -o "$tmp/oc.tgz" "$(jq -r .dist.tarball <<<"$meta")"
+  [ "sha512-$(openssl dgst -sha512 -binary "$tmp/oc.tgz" | base64 -w0)" = "$(jq -r .dist.integrity <<<"$meta")" ] \
+    || die "OpenCode download failed its checksum"
+  tar -C "$tmp" -xzf "$tmp/oc.tgz"
+  install -m 755 "$tmp/package/bin/opencode" /usr/local/bin/opencode
+  rm -rf "$tmp"
+}
+
+install_tools() {
+  : # Later: the team's standard tool subset (nmap, ...). Agents can already apt-get anything else.
+}
+
+install_opencode
+install_tools
+
+step "$ROLE agent for $AGENT_USER (model $MODEL)"
+as_user mkdir -p "$HOME_DIR/.config/opencode/agents"
+as_user cp "$ROOT/agents/$ROLE.md" "$HOME_DIR/.config/opencode/agents/"
+jq -n --arg m "$MODEL" --arg a "$ROLE" \
+  '{"$schema": "https://opencode.ai/config.json", model: $m, default_agent: $a, update: "disable"}' \
+  | as_user tee "$HOME_DIR/.config/opencode/opencode.json" >/dev/null
+
+launcher() { # app-menu entry that opens the agent in a terminal on this desktop
+  printf '[Desktop Entry]\nType=Application\nName=%s\nExec=%s\nIcon=utilities-terminal\nTerminal=true\n' "$1" "$2" \
+    > "/usr/share/applications/tristero-$ROLE.desktop"
+}
+
+if [ "$ROLE" = master ]; then
+  install -m 755 "$ROOT/bin/fleet" /usr/local/bin/fleet
+  as_user mkdir -p "$HOME_DIR/.config/tristero"
+  [ -f "$HOME_DIR/.config/tristero/fleet.json" ] || echo '{"workers": []}' | as_user tee "$HOME_DIR/.config/tristero/fleet.json" >/dev/null
+  chmod 600 "$HOME_DIR/.config/tristero/fleet.json"
+  launcher "Tristero master" "sh -c 'cd ~ && exec opencode'"
+  cat <<EOF
+
+== Master ready (agent user: $AGENT_USER)
+   1. On each worker, run: sudo ./provision worker
+   2. Paste the "fleet add ..." line each worker prints into a terminal here.
+   3. Check them with: fleet workers
+   4. Open "Tristero master" from the app menu, or run: cd ~ && opencode
+EOF
+  exit 0
+fi
+
+# Worker: a password-protected OpenCode server the master drives over HTTP.
+mkdir -p /etc/tristero
+if ! grep -q '^OPENCODE_SERVER_PASSWORD=' /etc/tristero/worker.env 2>/dev/null; then
+  echo "OPENCODE_SERVER_PASSWORD=$(openssl rand -hex 24)" > /etc/tristero/worker.env
+fi
+chown "root:$GROUP" /etc/tristero/worker.env
+chmod 640 /etc/tristero/worker.env
+PASSWORD=$(sed -n 's/^OPENCODE_SERVER_PASSWORD=//p' /etc/tristero/worker.env)
+
+cat > /etc/systemd/system/tristero-worker.service <<EOF
+[Unit]
+Description=Tristero worker (OpenCode server)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=$AGENT_USER
+Group=$GROUP
+EnvironmentFile=/etc/tristero/worker.env
+Environment=HOME=$HOME_DIR
+WorkingDirectory=$HOME_DIR
+ExecStart=/usr/local/bin/opencode serve --hostname 0.0.0.0 --port $PORT
+Restart=on-failure
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Lets the student watch, interrupt, or take over the session the master is driving.
+cat > /usr/local/bin/tristero-attach <<EOF
+#!/bin/sh
+. /etc/tristero/worker.env
+cd "\$HOME"
+OPENCODE_PASSWORD=\$OPENCODE_SERVER_PASSWORD exec opencode --server http://127.0.0.1:$PORT "\$@"
+EOF
+chmod 755 /usr/local/bin/tristero-attach
+launcher "Tristero worker agent" tristero-attach
+
+step "starting tristero-worker service"
+systemctl daemon-reload
+systemctl enable -q tristero-worker
+systemctl restart tristero-worker
+for _ in $(seq 30); do
+  curl -fs -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT/api/info" >/dev/null && break; sleep 1
+done || true
+curl -fs -u "opencode:$PASSWORD" "http://127.0.0.1:$PORT/api/info" >/dev/null \
+  || die "worker server not answering; see: journalctl -u tristero-worker"
+
+IP=$(ip -4 route get 1.1.1.1 2>/dev/null | grep -oP 'src \K\S+' || true)
+OTHERS=$(ip -4 -o addr show scope global | awk '{ sub(/\/.*/, "", $4); print $4 }' | grep -vx "${IP:-none}" | tr '\n' ' ' || true)
+cat <<EOF
+
+== Worker '$WORKER' ready (agent user: $AGENT_USER)
+   URL       http://${IP:-THIS-IP}:$PORT
+   Password  $PASSWORD
+   On the master, run:
+     fleet add $WORKER http://${IP:-THIS-IP}:$PORT $PASSWORD
+${OTHERS:+   Other addresses on this machine: $OTHERS
+}   Watch or take over this agent: open "Tristero worker agent" from the app menu, or run tristero-attach
+EOF

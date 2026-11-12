@@ -1,0 +1,31 @@
+#cloud-config
+# Test-lab stand-in for a student's Ubuntu 24.04 Desktop install: a normal sudo user with a
+# GNOME desktop. Tristero itself is installed afterwards by ./provision, as on a real machine.
+hostname: @HOSTNAME@
+ssh_pwauth: false
+users:
+  - name: student
+    gecos: Student
+    groups: [adm, sudo]
+    shell: /bin/bash
+    lock_passwd: false
+    plain_text_passwd: '@PASSWORD@'
+    ssh_authorized_keys: ['@SSH_KEY@']
+package_update: true
+packages: [ubuntu-desktop-minimal, spice-vdagent]
+write_files:
+  # Firefox's deb is a snap installer that fails inside cloud-init; the lab doesn't need a browser.
+  - path: /etc/apt/preferences.d/no-firefox
+    content: |
+      Package: firefox
+      Pin: release o=Ubuntu
+      Pin-Priority: -1
+  - path: /etc/gdm3/custom.conf
+    defer: true
+    content: |
+      [daemon]
+      AutomaticLoginEnable=true
+      AutomaticLogin=student
+runcmd:
+  - systemctl set-default graphical.target
+  - systemctl start --no-block gdm3
