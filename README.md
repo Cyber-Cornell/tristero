@@ -96,13 +96,6 @@ opencode run "Have every worker report hostname, kernel, and listening ports, th
 opencode run "Install nginx on worker-1 only and confirm it serves on port 80."
 ```
 
-## Known quirks
-
-- OpenCode's free models reject requests from an agent with no `read` tool (HTTP 429,
-  reported as "Free usage limit reached"). Keep `read` allowed if you restrict an agent.
-- A real free-tier limit gives the same error. All lab VMs share the host's public IP, so if
-  it persists, switch models with `TRISTERO_MODEL=opencode/<model> lab/lab deploy`.
-
 ## Not built yet
 
 Shared tool install (`install_tools` in `provision` is a stub), skills and playbooks, remote
