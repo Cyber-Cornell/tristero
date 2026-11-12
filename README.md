@@ -25,7 +25,11 @@ master VM                                     worker VMs
 - **`fleet`** (`bin/fleet`) is the whole orchestration API: `workers`, `send`, `wait`, `read`,
   `log`, `stop`, plus `add`/`remove` for the roster (students only; the master is denied these).
   Each worker gets one long-lived session, so it remembers earlier tasks.
-- Model: `opencode/deepseek-v4.1-flash-free` (anonymous, free). Override with `TRISTERO_MODEL`.
+- Model: `opencode/deepseek-v4.1-flash-free` (anonymous, free) by default. To use another
+  provider (e.g. the Z.AI coding plan), connect it on each machine (`/connect` in OpenCode),
+  then rerun provision with `TRISTERO_MODEL=zai-coding-plan/glm-5.3`. Reruns keep the
+  model a machine already has. Existing worker sessions keep their model; `fleet add` the
+  worker again to start a fresh session.
 
 ## Set up real machines
 

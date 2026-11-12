@@ -10,7 +10,6 @@ ROOT=$(cd "$(dirname "$0")" && pwd)
 ROLE=${1:-}
 WORKER=${2:-$(hostname -s)}
 OC_VERSION=2.2.7
-MODEL=${TRISTERO_MODEL:-opencode/deepseek-v4.1-flash-free}
 PORT=${TRISTERO_PORT:-4096}
 AGENT_USER=${TRISTERO_USER:-${SUDO_USER:-}}
 
@@ -26,6 +25,9 @@ step() { echo "==> $*"; }
 [ "$VERSION_ID" = 24.04 ] || echo "provision: warning: tested on Ubuntu 24.04, this is $VERSION_ID" >&2
 GROUP=$(id -gn "$AGENT_USER")
 HOME_DIR=$(getent passwd "$AGENT_USER" | cut -d: -f6)
+# Model: TRISTERO_MODEL if given, else keep what this machine already uses, else the free default.
+MODEL=${TRISTERO_MODEL:-$(jq -r ".model // empty" "$HOME_DIR/.config/opencode/opencode.json" 2>/dev/null || true)}
+MODEL=${MODEL:-opencode/deepseek-v4.1-flash-free}
 as_user() { sudo -u "$AGENT_USER" HOME="$HOME_DIR" "$@"; }
 
 step "base packages"
