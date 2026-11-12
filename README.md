@@ -8,6 +8,8 @@
 
 [![Demo: the master splits a weather-API task across two workers](docs/demo.jpg)](docs/demo.mp4)
 
+https://github.com/user-attachments/assets/c9720614-a93e-4e48-b472-12e9f5fb339c
+
 *Demo (35s, click to play): the master hands worker-2 a fake weather API and worker-1 a web
 page that consumes it, then waits for both.*
 
