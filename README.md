@@ -6,6 +6,11 @@
 > a master agent passes orders to a network of worker agents and they report back, while the
 > students keep the official business moving.
 
+[![Demo: the master splits a weather-API task across two workers](docs/demo.jpg)](docs/demo.mp4)
+
+*Demo (35s, click to play): the master hands worker-2 a fake weather API and worker-1 a web
+page that consumes it, then waits for both.*
+
 ## Orchestration (MVP)
 
 A master OpenCode agent splits work across worker OpenCode agents. Each agent runs on its own
